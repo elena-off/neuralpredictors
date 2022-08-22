@@ -748,6 +748,10 @@ class FullGaussian2d(nn.Module):
         else:
             self.register_parameter("bias", None)
 
+        if 'prev_responses' in kwargs:
+            if kwargs['prev_responses']:
+                self.initialize_modulator()
+
         self.init_mu_range = init_mu_range
         self.align_corners = align_corners
         self.initialize()
@@ -864,6 +868,13 @@ class FullGaussian2d(nn.Module):
         source_grid = source_grid / np.abs(source_grid).max()
         self.register_buffer("source_grid", torch.from_numpy(source_grid.astype(np.float32)))
         self._predicted_grid = True
+
+    def initialize_modulator(self,hidden_features = 10):
+        self.modulator = nn.Sequential(
+            nn.Linear(self.outdims,hidden_features),
+            nn.ELU(),
+            nn.Linear(hidden_features, self.outdims),
+            nn.ELU())
 
     def initialize(self):
         """
