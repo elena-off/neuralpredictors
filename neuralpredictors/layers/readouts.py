@@ -748,9 +748,17 @@ class FullGaussian2d(nn.Module):
         else:
             self.register_parameter("bias", None)
 
-        if 'prev_responses' in kwargs:
-            if kwargs['prev_responses']:
+        if kwargs.get('prev_responses',False):
+                self.prev_resps = True
                 self.initialize_modulator()
+        else:
+            self.prev_resps = False
+
+        if kwargs.get('context_resps',False):
+            self.context_resps = True
+            self.initialize_modulator()
+        else:
+            self.context_resps = False
 
         self.init_mu_range = init_mu_range
         self.align_corners = align_corners
@@ -1036,6 +1044,18 @@ class FullGaussian2d(nn.Module):
             else:
                 # reshape responses into (N, Outdims, h, w)
                 y = y.permute(0, 3, 1, 2)
+
+        #add other responses for same image
+        if self.context_resps:
+            targets = kwargs["targets"]
+            targets = np.repeat(targets[:,:,None], repeats = self.outdims, axis = 0).reshape(-1,self.outdims) #repeat targets num_neuron number of times
+            idx_final=np.stack((np.arange(N*self.outdims),np.tile(np.arange(self.outdims),N)),axis=-1).reshape(-1,2) #find indices that need to be nulled
+            targets[idx_final[:,0],idx_final[:,1]]=0 #null the indices
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            targets = targets.to(device)
+            y_context = self.modulator(targets)
+            y_context = y_context[idx_final[:,0],idx_final[:,1]].reshape(-1,self.outdims) #get the predictions from the respective neurons that were zeroed out
+            y*= y_context
 
         return y
 
