@@ -748,17 +748,22 @@ class FullGaussian2d(nn.Module):
         else:
             self.register_parameter("bias", None)
 
-        if kwargs.get('prev_responses',False):
+        if kwargs.get('prev_resps',False):
                 self.prev_resps = True
+                self.hidden_layers = kwargs.get('hidden_layers',1)
+                self.hidden_features = kwargs.get('hidden_features',10)
                 self.initialize_modulator()
         else:
             self.prev_resps = False
 
         if kwargs.get('context_resps',False):
             self.context_resps = True
+            self.hidden_layers = kwargs.get('hidden_layers',1)
+            self.hidden_features = kwargs.get('hidden_features',10)
             self.initialize_modulator()
         else:
             self.context_resps = False
+        self.combine_addition = kwargs.get('combine_addition',False)
 
         self.init_mu_range = init_mu_range
         self.align_corners = align_corners
@@ -877,13 +882,18 @@ class FullGaussian2d(nn.Module):
         self.register_buffer("source_grid", torch.from_numpy(source_grid.astype(np.float32)))
         self._predicted_grid = True
 
-    def initialize_modulator(self,hidden_features = 10):
-        self.modulator = nn.Sequential(
-            nn.Linear(self.outdims,hidden_features),
-            nn.ELU(),
-            nn.Linear(hidden_features, self.outdims),
-            nn.ELU())
-
+    def initialize_modulator(self):
+        layers = [nn.Linear(self.outdims, self.hidden_features if self.hidden_layers > 0 else self.outdims)]
+        for i in range(self.hidden_layers):
+            layers.extend(
+                [
+                    nn.ELU(),
+                    nn.Linear(self.hidden_features, self.hidden_features if i < self.hidden_layers - 1 else self.outdims),
+                ]
+            )
+        layers.append(nn.ELU())
+        self.modulator = nn.Sequential(*layers)
+        print(self.modulator)
     def initialize(self):
         """
         Initializes the mean, and sigma of the Gaussian readout along with the features weights
@@ -1050,12 +1060,30 @@ class FullGaussian2d(nn.Module):
             targets = kwargs["targets"]
             targets = np.repeat(targets[:,:,None], repeats = self.outdims, axis = 0).reshape(-1,self.outdims) #repeat targets num_neuron number of times
             idx_final=np.stack((np.arange(N*self.outdims),np.tile(np.arange(self.outdims),N)),axis=-1).reshape(-1,2) #find indices that need to be nulled
-            targets[idx_final[:,0],idx_final[:,1]]=0 #null the indices
+            targets[idx_final[:,0],idx_final[:,1]]= 0 #null the indices
             device = "cuda" if torch.cuda.is_available() else "cpu"
             targets = targets.to(device)
             y_context = self.modulator(targets)
             y_context = y_context[idx_final[:,0],idx_final[:,1]].reshape(-1,self.outdims) #get the predictions from the respective neurons that were zeroed out
-            y*= y_context
+            if(self.combine_addition):
+                y+=y_context
+            else:
+                y*= y_context
+
+        #add responses to previous image
+        if self.prev_resps:
+            #if kwargs['inputs'].shape[1] == 1:
+            #    raise ValueError("Previous responses must be included in dataloader-input")
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            prev_resps = kwargs['prev_resps'].to(device)
+            #prev_inputs = kwargs['inputs'][:,-1,:,:] #previous inputs are added to inputs in dataloader
+            #prev_resps = prev_inputs[:,0,0:self.outdims].to(device)
+            y_prev = self.modulator(prev_resps)
+            if(self.combine_addition):
+                y+=y_prev
+            else:
+                y*= y_prev
+
 
         return y
 
