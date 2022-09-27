@@ -750,20 +750,22 @@ class FullGaussian2d(nn.Module):
 
         if kwargs.get('prev_resps',False):
                 self.prev_resps = True
-                self.hidden_layers = kwargs.get('hidden_layers',1)
-                self.hidden_features = kwargs.get('hidden_features',10)
-                self.initialize_modulator()
+                self.prev_hidden_layers = kwargs.get('prev_hidden_layers',1)
+                self.prev_hidden_features = kwargs.get('prev_hidden_features',10)
+                self.prev_combine_addition = kwargs.get('prev_combine_addition',False)
+                self.initialize_prev_modulator()
         else:
             self.prev_resps = False
 
         if kwargs.get('context_resps',False):
             self.context_resps = True
-            self.hidden_layers = kwargs.get('hidden_layers',1)
-            self.hidden_features = kwargs.get('hidden_features',10)
-            self.initialize_modulator()
+            self.context_hidden_layers = kwargs.get('context_hidden_layers',1)
+            self.context_hidden_features = kwargs.get('context_hidden_features',10)
+            self.context_combine_addition = kwargs.get('context_combine_addition',False)
+            self.initialize_context_modulator()
         else:
             self.context_resps = False
-        self.combine_addition = kwargs.get('combine_addition',False)
+
 
         self.init_mu_range = init_mu_range
         self.align_corners = align_corners
@@ -882,18 +884,34 @@ class FullGaussian2d(nn.Module):
         self.register_buffer("source_grid", torch.from_numpy(source_grid.astype(np.float32)))
         self._predicted_grid = True
 
-    def initialize_modulator(self):
-        layers = [nn.Linear(self.outdims, self.hidden_features if self.hidden_layers > 0 else self.outdims)]
-        for i in range(self.hidden_layers):
+    def initialize_prev_modulator(self):
+        layers = [nn.Linear(self.outdims, self.prev_hidden_features if self.prev_hidden_layers > 0 else self.outdims)]
+        for i in range(self.prev_hidden_layers):
             layers.extend(
                 [
                     nn.ELU(),
-                    nn.Linear(self.hidden_features, self.hidden_features if i < self.hidden_layers - 1 else self.outdims),
+                    nn.Linear(self.prev_hidden_features, self.prev_hidden_features if i < self.prev_hidden_layers - 1 else self.outdims),
                 ]
             )
         layers.append(nn.ELU())
-        self.modulator = nn.Sequential(*layers)
-        print(self.modulator)
+        self.prev_modulator = nn.Sequential(*layers)
+        print("prev modulator:")
+        print(self.prev_modulator)
+
+    def initialize_context_modulator(self):
+        layers = [nn.Linear(self.outdims, self.context_hidden_features if self.context_hidden_layers > 0 else self.outdims)]
+        for i in range(self.context_hidden_layers):
+            layers.extend(
+                [
+                    nn.ELU(),
+                    nn.Linear(self.context_hidden_features, self.context_hidden_features if i < self.context_hidden_layers - 1 else self.outdims),
+                ]
+            )
+        layers.append(nn.ELU())
+        self.context_modulator = nn.Sequential(*layers)
+        print("context modulator:")
+        print(self.context_modulator)
+
     def initialize(self):
         """
         Initializes the mean, and sigma of the Gaussian readout along with the features weights
@@ -1063,23 +1081,19 @@ class FullGaussian2d(nn.Module):
             targets[idx_final[:,0],idx_final[:,1]]= 0 #null the indices
             device = "cuda" if torch.cuda.is_available() else "cpu"
             targets = targets.to(device)
-            y_context = self.modulator(targets)
+            y_context = self.context_modulator(targets)
             y_context = y_context[idx_final[:,0],idx_final[:,1]].reshape(-1,self.outdims) #get the predictions from the respective neurons that were zeroed out
-            if(self.combine_addition):
+            if(self.context_combine_addition):
                 y+=y_context
             else:
                 y*= y_context
 
         #add responses to previous image
         if self.prev_resps:
-            #if kwargs['inputs'].shape[1] == 1:
-            #    raise ValueError("Previous responses must be included in dataloader-input")
             device = "cuda" if torch.cuda.is_available() else "cpu"
             prev_resps = kwargs['prev_resps'].to(device)
-            #prev_inputs = kwargs['inputs'][:,-1,:,:] #previous inputs are added to inputs in dataloader
-            #prev_resps = prev_inputs[:,0,0:self.outdims].to(device)
-            y_prev = self.modulator(prev_resps)
-            if(self.combine_addition):
+            y_prev = self.prev_modulator(prev_resps)
+            if(self.prev_combine_addition):
                 y+=y_prev
             else:
                 y*= y_prev
