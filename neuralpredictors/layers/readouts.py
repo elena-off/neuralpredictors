@@ -748,6 +748,11 @@ class FullGaussian2d(nn.Module):
         else:
             self.register_parameter("bias", None)
 
+        if kwargs.get('no_bias_prev',False):
+            self.bias_prev = False
+        else:
+            self.bias_prev = True
+
         if kwargs.get('prev_resps',False):
                 self.prev_resps = True
                 self.prev_hidden_layers = kwargs.get('prev_hidden_layers',1)
@@ -756,6 +761,22 @@ class FullGaussian2d(nn.Module):
                 self.initialize_prev_modulator()
         else:
             self.prev_resps = False
+
+        if kwargs.get('other_resps',False):
+                self.other_resps = True
+                self.other_hidden_layers = kwargs.get('other_hidden_layers',1)
+                self.other_hidden_features = kwargs.get('other_hidden_features',10)
+                self.other_combine_addition = kwargs.get('other_combine_addition',False)
+                print("other combine addition:")
+                print(self.other_combine_addition)
+                self.initialize_other_modulator()
+        else:
+            self.other_resps = False
+
+        if kwargs.get('no_bias_context',False):
+            self.bias_context = False
+        else:
+            self.bias_context = True
 
         if kwargs.get('context_resps',False):
             self.context_resps = True
@@ -815,6 +836,19 @@ class FullGaussian2d(nn.Module):
                 return self._features.abs().sum()
         else:
             return 0
+
+    def context_modulator_l1(self):
+        """
+        Returns the l1 regularization term of the context modulator weights
+        """
+        return sum(p.abs().sum() for p in self.context_modulator.parameters())
+
+    def prev_modulator_l1(self):
+        """
+        Returns the l1 regularization term of the previous modulator weights
+        """
+        return sum(p.abs().sum() for p in self.prev_modulator.parameters())
+
 
     @property
     def mu(self):
@@ -885,12 +919,12 @@ class FullGaussian2d(nn.Module):
         self._predicted_grid = True
 
     def initialize_prev_modulator(self):
-        layers = [nn.Linear(self.outdims, self.prev_hidden_features if self.prev_hidden_layers > 0 else self.outdims)]
+        layers = [nn.Linear(self.outdims, self.prev_hidden_features if self.prev_hidden_layers > 0 else self.outdims, bias = self.bias_prev)]
         for i in range(self.prev_hidden_layers):
             layers.extend(
                 [
                     nn.ELU(),
-                    nn.Linear(self.prev_hidden_features, self.prev_hidden_features if i < self.prev_hidden_layers - 1 else self.outdims),
+                    nn.Linear(self.prev_hidden_features, self.prev_hidden_features if i < self.prev_hidden_layers - 1 else self.outdims, bias = self.bias_prev),
                 ]
             )
         layers.append(nn.ELU())
@@ -898,13 +932,27 @@ class FullGaussian2d(nn.Module):
         print("prev modulator:")
         print(self.prev_modulator)
 
+    def initialize_other_modulator(self):
+        layers = [nn.Linear(self.outdims, self.other_hidden_features if self.other_hidden_layers > 0 else self.outdims)]
+        for i in range(self.other_hidden_layers):
+            layers.extend(
+                [
+                    nn.ELU(),
+                    nn.Linear(self.other_hidden_features, self.other_hidden_features if i < self.other_hidden_layers - 1 else self.outdims),
+                ]
+            )
+        layers.append(nn.ELU())
+        self.other_modulator = nn.Sequential(*layers)
+        print("other modulator:")
+        print(self.other_modulator)
+
     def initialize_context_modulator(self):
-        layers = [nn.Linear(self.outdims, self.context_hidden_features if self.context_hidden_layers > 0 else self.outdims)]
+        layers = [nn.Linear(self.outdims, self.context_hidden_features if self.context_hidden_layers > 0 else self.outdims, bias = self.bias_context)]
         for i in range(self.context_hidden_layers):
             layers.extend(
                 [
                     nn.ELU(),
-                    nn.Linear(self.context_hidden_features, self.context_hidden_features if i < self.context_hidden_layers - 1 else self.outdims),
+                    nn.Linear(self.context_hidden_features, self.context_hidden_features if i < self.context_hidden_layers - 1 else self.outdims, bias = self.bias_context),
                 ]
             )
         layers.append(nn.ELU())
@@ -1087,6 +1135,20 @@ class FullGaussian2d(nn.Module):
                 y+=y_context
             else:
                 y*= y_context
+
+        if self.other_resps:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            other_resps = kwargs['other_resps']
+            other_resps = np.repeat(other_resps[:,:,None], repeats = self.outdims, axis = 0).reshape(-1,self.outdims) #repeat resps num_neuron number of times
+            idx_final=np.stack((np.arange(N*self.outdims),np.tile(np.arange(self.outdims),N)),axis=-1).reshape(-1,2) #find indices that need to be nulled
+            other_resps[idx_final[:,0],idx_final[:,1]]= 0 #null the indices
+            other_resps = other_resps.to(device)
+            y_other = self.other_modulator(other_resps)
+            y_other = y_other[idx_final[:,0],idx_final[:,1]].reshape(-1,self.outdims)
+            if(self.other_combine_addition):
+                y+=y_other
+            else:
+                y*= y_other
 
         #add responses to previous image
         if self.prev_resps:
