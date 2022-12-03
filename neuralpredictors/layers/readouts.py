@@ -762,6 +762,9 @@ class FullGaussian2d(nn.Module):
         else:
             self.prev_resps = False
 
+        if kwargs.get('bools',False):
+            self.bools=True
+
         if kwargs.get('other_resps',False):
                 self.other_resps = True
                 self.other_hidden_layers = kwargs.get('other_hidden_layers',1)
@@ -1160,6 +1163,10 @@ class FullGaussian2d(nn.Module):
             else:
                 y*= y_prev
 
+        if 'bools' in kwargs:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            mask = kwargs['bools'].to(device)
+            y = y*mask
 
         return y
 
