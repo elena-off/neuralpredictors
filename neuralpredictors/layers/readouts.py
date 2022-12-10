@@ -762,9 +762,6 @@ class FullGaussian2d(nn.Module):
         else:
             self.prev_resps = False
 
-        if kwargs.get('bools',False):
-            self.bools=True
-
         if kwargs.get('other_resps',False):
                 self.other_resps = True
                 self.other_hidden_layers = kwargs.get('other_hidden_layers',1)
@@ -780,6 +777,8 @@ class FullGaussian2d(nn.Module):
             self.bias_context = False
         else:
             self.bias_context = True
+
+        self.n_neurons = kwargs.get('n_neurons', None)
 
         if kwargs.get('context_resps',False):
             self.context_resps = True
@@ -1131,6 +1130,14 @@ class FullGaussian2d(nn.Module):
             idx_final=np.stack((np.arange(N*self.outdims),np.tile(np.arange(self.outdims),N)),axis=-1).reshape(-1,2) #find indices that need to be nulled
             targets[idx_final[:,0],idx_final[:,1]]= 0 #null the indices
             device = "cuda" if torch.cuda.is_available() else "cpu"
+            if self.n_neurons is not None:
+                n_neurons = self.n_neurons[0]
+                mask = np.zeros((self.outdims,self.outdims))
+                for i in np.arange(len(n_neurons)-1):
+                    mask[n_neurons[i]:n_neurons[i+1],n_neurons[i]:n_neurons[i+1]] = 1
+                mask = np.tile(mask, (N,1))
+                targets = (targets*mask).float()
+
             targets = targets.to(device)
             y_context = self.context_modulator(targets)
             y_context = y_context[idx_final[:,0],idx_final[:,1]].reshape(-1,self.outdims) #get the predictions from the respective neurons that were zeroed out
