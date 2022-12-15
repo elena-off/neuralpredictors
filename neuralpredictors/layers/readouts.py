@@ -11,6 +11,7 @@ from torch.nn import functional as F
 from ..constraints import positive
 from ..utils import PositionalEncoding2D
 
+
 class ConfigurationError(Exception):
     pass
 
@@ -596,7 +597,12 @@ class PointPyramid2d(nn.Module):
         else:
             return self.features.abs().sum()
 
-    def forward(self, x, shift=None, **kwargs,):
+    def forward(
+        self,
+        x,
+        shift=None,
+        **kwargs,
+    ):
         if self.positive:
             positive(self.features)
         self.grid.data = torch.clamp(self.grid.data, -1, 1)
@@ -748,48 +754,6 @@ class FullGaussian2d(nn.Module):
         else:
             self.register_parameter("bias", None)
 
-        if kwargs.get('no_bias_prev',False):
-            self.bias_prev = False
-        else:
-            self.bias_prev = True
-
-        if kwargs.get('prev_resps',False):
-                self.prev_resps = True
-                self.prev_hidden_layers = kwargs.get('prev_hidden_layers',1)
-                self.prev_hidden_features = kwargs.get('prev_hidden_features',10)
-                self.prev_combine_addition = kwargs.get('prev_combine_addition',False)
-                self.initialize_prev_modulator()
-        else:
-            self.prev_resps = False
-
-        if kwargs.get('other_resps',False):
-                self.other_resps = True
-                self.other_hidden_layers = kwargs.get('other_hidden_layers',1)
-                self.other_hidden_features = kwargs.get('other_hidden_features',10)
-                self.other_combine_addition = kwargs.get('other_combine_addition',False)
-                print("other combine addition:")
-                print(self.other_combine_addition)
-                self.initialize_other_modulator()
-        else:
-            self.other_resps = False
-
-        if kwargs.get('no_bias_context',False):
-            self.bias_context = False
-        else:
-            self.bias_context = True
-
-        self.n_neurons = kwargs.get('n_neurons', None)
-
-        if kwargs.get('context_resps',False):
-            self.context_resps = True
-            self.context_hidden_layers = kwargs.get('context_hidden_layers',1)
-            self.context_hidden_features = kwargs.get('context_hidden_features',10)
-            self.context_combine_addition = kwargs.get('context_combine_addition',False)
-            self.initialize_context_modulator()
-        else:
-            self.context_resps = False
-
-
         self.init_mu_range = init_mu_range
         self.align_corners = align_corners
         self.initialize()
@@ -838,19 +802,6 @@ class FullGaussian2d(nn.Module):
                 return self._features.abs().sum()
         else:
             return 0
-
-    def context_modulator_l1(self):
-        """
-        Returns the l1 regularization term of the context modulator weights
-        """
-        return sum(p.abs().sum() for p in self.context_modulator.parameters())
-
-    def prev_modulator_l1(self):
-        """
-        Returns the l1 regularization term of the previous modulator weights
-        """
-        return sum(p.abs().sum() for p in self.prev_modulator.parameters())
-
 
     @property
     def mu(self):
@@ -919,48 +870,6 @@ class FullGaussian2d(nn.Module):
         source_grid = source_grid / np.abs(source_grid).max()
         self.register_buffer("source_grid", torch.from_numpy(source_grid.astype(np.float32)))
         self._predicted_grid = True
-
-    def initialize_prev_modulator(self):
-        layers = [nn.Linear(self.outdims, self.prev_hidden_features if self.prev_hidden_layers > 0 else self.outdims, bias = self.bias_prev)]
-        for i in range(self.prev_hidden_layers):
-            layers.extend(
-                [
-                    nn.ELU(),
-                    nn.Linear(self.prev_hidden_features, self.prev_hidden_features if i < self.prev_hidden_layers - 1 else self.outdims, bias = self.bias_prev),
-                ]
-            )
-        layers.append(nn.ELU())
-        self.prev_modulator = nn.Sequential(*layers)
-        print("prev modulator:")
-        print(self.prev_modulator)
-
-    def initialize_other_modulator(self):
-        layers = [nn.Linear(self.outdims, self.other_hidden_features if self.other_hidden_layers > 0 else self.outdims)]
-        for i in range(self.other_hidden_layers):
-            layers.extend(
-                [
-                    nn.ELU(),
-                    nn.Linear(self.other_hidden_features, self.other_hidden_features if i < self.other_hidden_layers - 1 else self.outdims),
-                ]
-            )
-        layers.append(nn.ELU())
-        self.other_modulator = nn.Sequential(*layers)
-        print("other modulator:")
-        print(self.other_modulator)
-
-    def initialize_context_modulator(self):
-        layers = [nn.Linear(self.outdims, self.context_hidden_features if self.context_hidden_layers > 0 else self.outdims, bias = self.bias_context)]
-        for i in range(self.context_hidden_layers):
-            layers.extend(
-                [
-                    nn.ELU(),
-                    nn.Linear(self.context_hidden_features, self.context_hidden_features if i < self.context_hidden_layers - 1 else self.outdims, bias = self.bias_context),
-                ]
-            )
-        layers.append(nn.ELU())
-        self.context_modulator = nn.Sequential(*layers)
-        print("context modulator:")
-        print(self.context_modulator)
 
     def initialize(self):
         """
@@ -1123,58 +1032,6 @@ class FullGaussian2d(nn.Module):
                 # reshape responses into (N, Outdims, h, w)
                 y = y.permute(0, 3, 1, 2)
 
-        #add other responses for same image
-        if self.context_resps:
-            targets = kwargs["targets"]
-            targets = np.repeat(targets[:,:,None], repeats = self.outdims, axis = 0).reshape(-1,self.outdims) #repeat targets num_neuron number of times
-            idx_final=np.stack((np.arange(N*self.outdims),np.tile(np.arange(self.outdims),N)),axis=-1).reshape(-1,2) #find indices that need to be nulled
-            targets[idx_final[:,0],idx_final[:,1]]= 0 #null the indices
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            if self.n_neurons is not None:
-                n_neurons = self.n_neurons[0]
-                mask = np.zeros((self.outdims,self.outdims))
-                for i in np.arange(len(n_neurons)-1):
-                    mask[n_neurons[i]:n_neurons[i+1],n_neurons[i]:n_neurons[i+1]] = 1
-                mask = np.tile(mask, (N,1))
-                targets = (targets*mask).float()
-
-            targets = targets.to(device)
-            y_context = self.context_modulator(targets)
-            y_context = y_context[idx_final[:,0],idx_final[:,1]].reshape(-1,self.outdims) #get the predictions from the respective neurons that were zeroed out
-            if(self.context_combine_addition):
-                y+=y_context
-            else:
-                y*= y_context
-
-        if self.other_resps:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            other_resps = kwargs['other_resps']
-            other_resps = np.repeat(other_resps[:,:,None], repeats = self.outdims, axis = 0).reshape(-1,self.outdims) #repeat resps num_neuron number of times
-            idx_final=np.stack((np.arange(N*self.outdims),np.tile(np.arange(self.outdims),N)),axis=-1).reshape(-1,2) #find indices that need to be nulled
-            other_resps[idx_final[:,0],idx_final[:,1]]= 0 #null the indices
-            other_resps = other_resps.to(device)
-            y_other = self.other_modulator(other_resps)
-            y_other = y_other[idx_final[:,0],idx_final[:,1]].reshape(-1,self.outdims)
-            if(self.other_combine_addition):
-                y+=y_other
-            else:
-                y*= y_other
-
-        #add responses to previous image
-        if self.prev_resps:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            prev_resps = kwargs['prev_resps'].to(device)
-            y_prev = self.prev_modulator(prev_resps)
-            if(self.prev_combine_addition):
-                y+=y_prev
-            else:
-                y*= y_prev
-
-        if 'bools' in kwargs:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            mask = kwargs['bools'].to(device)
-            y = y*mask
-
         return y
 
     def __repr__(self):
@@ -1194,6 +1051,328 @@ class FullGaussian2d(nn.Module):
         for ch in self.children():
             r += "  -> " + ch.__repr__() + "\n"
         return r
+
+
+class FullGaussian2dModulators(FullGaussian2d):
+    """
+    A readout using a spatial transformer layer whose positions are sampled from one Gaussian per neuron. Mean
+    and covariance of that Gaussian are learned. In addition, the information for the previous or the context responses
+    can be incorporated via modulators (MLPs).
+
+    Args:
+        in_shape (list, tuple): shape of the input feature map [channels, width, height]
+        outdims (int): number of output units
+        bias (bool): adds a bias term
+        init_mu_range (float): initialises the the mean with Uniform([-init_range, init_range])
+                            [expected: positive value <=1]. Default: 0.1
+        init_sigma (float): The standard deviation of the Gaussian with `init_sigma` when `gauss_type` is
+            'isotropic' or 'uncorrelated'. When `gauss_type='full'` initialize the square root of the
+            covariance matrix with with Uniform([-init_sigma, init_sigma]). Default: 1
+        batch_sample (bool): if True, samples a position for each image in the batch separately
+                            [default: True as it decreases convergence time and performs just as well]
+        align_corners (bool): Keyword agrument to gridsample for bilinear interpolation.
+                It changed behavior in PyTorch 1.3. The default of align_corners = True is setting the
+                behavior to pre PyTorch 1.3 functionality for comparability.
+        gauss_type (str): Which Gaussian to use. Options are 'isotropic', 'uncorrelated', or 'full' (default).
+        grid_mean_predictor (dict): Parameters for a predictor of the mean grid locations. Has to have a form like
+                        {
+                        'hidden_layers':0,
+                        'hidden_features':20,
+                        'final_tanh': False,
+                        }
+        shared_features (dict): Used when the feature vectors are shared (within readout between neurons) or between
+                this readout and other readouts. Has to be a dictionary of the form
+               {
+                    'match_ids': (numpy.array),
+                    'shared_features': torch.nn.Parameter or None
+                }
+                The match_ids are used to match things that should be shared within or across scans.
+                If `shared_features` is None, this readout will create its own features. If it is set to
+                a feature Parameter of another readout, it will replace the features of this readout. It will be
+                access in increasing order of the sorted unique match_ids. For instance, if match_ids=[2,0,0,1],
+                there should be 3 features in order [0,1,2]. When this readout creates features, it will do so in
+                that order.
+        shared_grid (dict): Like `shared_features`. Use dictionary like
+               {
+                    'match_ids': (numpy.array),
+                    'shared_grid': torch.nn.Parameter or None
+                }
+                See documentation of `shared_features` for specification.
+
+        source_grid (numpy.array):
+                Source grid for the grid_mean_predictor.
+                Needs to be of size neurons x grid_mean_predictor[input_dimensions]
+
+    """
+
+    def __init__(
+        self,
+        *args,
+        prev_resps=False,
+        prev_hidden_layers=1,
+        prev_hidden_features=10,
+        prev_combine_addition=False,
+        bias_prev=True,
+        other_resps=False,
+        other_hidden_layers=1,
+        other_hidden_features=10,
+        other_combine_addition=False,
+        context_resps=False,
+        context_hidden_layers=1,
+        context_hidden_features=10,
+        context_combine_addition=False,
+        bias_context=True,
+        n_neurons=None,
+        **kwargs,
+    ):
+        print("new readout!")
+        self.prev_resps = prev_resps
+        self.prev_hidden_layers = prev_hidden_layers
+        self.prev_hidden_features = prev_hidden_features
+        self.prev_combine_addition = prev_combine_addition
+        self.bias_prev = bias_prev
+        self.other_resps = other_resps
+        self.other_hidden_layers = other_hidden_layers
+        self.other_hidden_features = other_hidden_features
+        self.other_combine_addition = other_combine_addition
+        self.context_resps = context_resps
+        self.context_hidden_layers = context_hidden_layers
+        self.context_hidden_features = context_hidden_features
+        self.context_combine_addition = context_combine_addition
+        self.bias_context = bias_context
+        self.n_neurons = n_neurons
+        print(self.n_neurons)
+
+        super().__init__(*args, **kwargs)
+
+        if self.prev_resps:
+            print("prev combine addition:")
+            print(self.prev_combine_addition)
+            self.initialize_prev_modulator()
+
+        if self.other_resps:
+            print("other combine addition:")
+            print(self.other_combine_addition)
+            self.initialize_other_modulator()
+
+        if self.context_resps:
+            print("context combine addition:")
+            print(self.context_combine_addition)
+            self.initialize_context_modulator()
+
+    def context_modulator_l1(self):
+        """
+        Returns the l1 regularization term of the context modulator weights
+        """
+        return sum(p.abs().sum() for p in self.context_modulator.parameters())
+
+    def prev_modulator_l1(self):
+        """
+        Returns the l1 regularization term of the previous modulator weights
+        """
+        return sum(p.abs().sum() for p in self.prev_modulator.parameters())
+
+    def initialize_prev_modulator(self):
+        layers = [
+            nn.Linear(
+                self.outdims,
+                self.prev_hidden_features if self.prev_hidden_layers > 0 else self.outdims,
+                bias=self.bias_prev,
+            )
+        ]
+        for i in range(self.prev_hidden_layers):
+            layers.extend(
+                [
+                    nn.ELU(),
+                    nn.Linear(
+                        self.prev_hidden_features,
+                        self.prev_hidden_features if i < self.prev_hidden_layers - 1 else self.outdims,
+                        bias=self.bias_prev,
+                    ),
+                ]
+            )
+        layers.append(nn.ELU())
+        self.prev_modulator = nn.Sequential(*layers)
+        print("prev modulator:")
+        print(self.prev_modulator)
+
+    def initialize_other_modulator(self):
+        layers = [nn.Linear(self.outdims, self.other_hidden_features if self.other_hidden_layers > 0 else self.outdims)]
+        for i in range(self.other_hidden_layers):
+            layers.extend(
+                [
+                    nn.ELU(),
+                    nn.Linear(
+                        self.other_hidden_features,
+                        self.other_hidden_features if i < self.other_hidden_layers - 1 else self.outdims,
+                    ),
+                ]
+            )
+        layers.append(nn.ELU())
+        self.other_modulator = nn.Sequential(*layers)
+        print("other modulator:")
+        print(self.other_modulator)
+
+    def initialize_context_modulator(self):
+        layers = [
+            nn.Linear(
+                self.outdims,
+                self.context_hidden_features if self.context_hidden_layers > 0 else self.outdims,
+                bias=self.bias_context,
+            )
+        ]
+        for i in range(self.context_hidden_layers):
+            layers.extend(
+                [
+                    nn.ELU(),
+                    nn.Linear(
+                        self.context_hidden_features,
+                        self.context_hidden_features if i < self.context_hidden_layers - 1 else self.outdims,
+                        bias=self.bias_context,
+                    ),
+                ]
+            )
+        layers.append(nn.ELU())
+        self.context_modulator = nn.Sequential(*layers)
+        print("context modulator:")
+        print(self.context_modulator)
+
+    def forward(
+        self, x, sample=None, shift=None, out_idx=None, multiplex=False, crop_edge_px=None, collapse=True, **kwargs
+    ):
+        """
+        Propagates the input forwards through the readout
+        Args:
+            x: input data
+            sample (bool/None): sample determines whether we draw a sample from Gaussian distribution, N(mu,sigma), defined per neuron
+                            or use the mean, mu, of the Gaussian distribution without sampling.
+                           if sample is None (default), samples from the N(mu,sigma) during training phase and
+                             fixes to the mean, mu, during evaluation phase.
+                           if sample is True/False, overrides the model_state (i.e training or eval) and does as instructed
+            shift (bool): shifts the location of the grid (from eye-tracking data)
+            out_idx (bool): index of neurons to be predicted
+            multiplex (bool): if True, the neurons do not readout from their grid position,
+                            but from every position, i.e. every pixel, instead. Thus, each neuron is effectively copied
+                            to all positions in the image. The neuronal activity output matrix is then no longer
+                            (batch, neurons), but (batch, neurons x locations), when  the `collapse` argument is True,
+                            or (batch, neurons, height x width)
+            crop_edge_px (int): When multiplex is True, the response to all pixels that are cropped. Cropping
+                            will be symmetric by n pixels as specified by this argument.
+            collapse (bool): This argument can be used to modify the output shape of the readout when multiplex is
+                            set to True.
+                            By default (collapse=True), the readout returns the output in the shape of
+                            (batch, neurons x locations). When collapse=False, the returned shape will be:
+                            (batch, neurons, height x width)
+
+
+        Returns:
+            y: neuronal activity. shape: default (batch, neurons),
+                if multiplex=True and collapse=False (batch, neurons x locations),
+                if multiplex=True and collapse=True (batch, neurons, height x width)
+        """
+        N, c, w, h = x.size()
+        c_in, w_in, h_in = self.in_shape
+        if (c_in, w_in, h_in) != (c, w, h):
+            warnings.warn("the specified feature map dimension is not the readout's expected input dimension")
+        feat = self.features.view(1, c, self.outdims)
+        bias = self.bias
+        outdims = self.outdims
+
+        if self.batch_sample:
+            # sample the grid_locations separately per image per batch
+            grid = self.sample_grid(batch_size=N, sample=sample)  # sample determines sampling from Gaussian
+        else:
+            # use one sampled grid_locations for all images in the batch
+            grid = self.sample_grid(batch_size=1, sample=sample).expand(N, outdims, 1, 2)
+
+        if out_idx is not None:
+            if isinstance(out_idx, np.ndarray):
+                if out_idx.dtype == bool:
+                    out_idx = np.where(out_idx)[0]
+            feat = feat[:, :, out_idx]
+            grid = grid[:, out_idx]
+            if bias is not None:
+                bias = bias[out_idx]
+            outdims = len(out_idx)
+
+        if shift is not None:
+            grid = grid + shift[:, None, None, :]
+
+        if multiplex:
+            # einsum dimensions: batchsize, channels, width, height * 1, channel, n_neurons
+            # -> batchsize, width, height, neurons
+            y = torch.einsum("ncwh,uco->nwho", x, feat)
+        else:
+            y = F.grid_sample(x, grid, align_corners=self.align_corners)
+            y = (y.squeeze(-1) * feat).sum(1).view(N, outdims)
+
+        if self.bias is not None:
+            y = y + bias
+
+        if multiplex:
+            if crop_edge_px:
+                y = y[:, crop_edge_px:-crop_edge_px, crop_edge_px:-crop_edge_px, :]
+
+            if collapse:
+                y = y.reshape(N, -1)
+            else:
+                # reshape responses into (N, Outdims, h, w)
+                y = y.permute(0, 3, 1, 2)
+
+        # add other responses for same image
+        if self.context_resps:
+            targets = kwargs["targets"]
+            targets = np.repeat(targets[:, :, None], repeats=self.outdims, axis=0).reshape(
+                -1, self.outdims
+            )  # repeat targets num_neuron number of times
+            idx_final = np.stack((np.arange(N * self.outdims), np.tile(np.arange(self.outdims), N)), axis=-1).reshape(
+                -1, 2
+            )  # find indices that need to be nulled
+            targets[idx_final[:, 0], idx_final[:, 1]] = 0  # null the indices
+            if self.n_neurons is not None:
+                n_neurons = self.n_neurons[0]
+                mask = np.zeros((self.outdims, self.outdims))
+                for i in np.arange(len(n_neurons) - 1):
+                    mask[n_neurons[i] : n_neurons[i + 1], n_neurons[i] : n_neurons[i + 1]] = 1
+                mask = np.tile(mask, (N, 1))
+                targets = (targets * mask).float()
+            targets = targets.to(y.device)  # have to move targets to cuda if necessary
+            y_context = self.context_modulator(targets)
+            y_context = y_context[idx_final[:, 0], idx_final[:, 1]].reshape(
+                -1, self.outdims
+            )  # get the predictions from the respective neurons that were zeroed out
+            if self.context_combine_addition:
+                y += y_context
+            else:
+                y *= y_context
+
+        if self.other_resps:
+            other_resps = kwargs["other_resps"]
+            other_resps = np.repeat(other_resps[:, :, None], repeats=self.outdims, axis=0).reshape(
+                -1, self.outdims
+            )  # repeat resps num_neuron number of times
+            idx_final = np.stack((np.arange(N * self.outdims), np.tile(np.arange(self.outdims), N)), axis=-1).reshape(
+                -1, 2
+            )  # find indices that need to be nulled
+            other_resps[idx_final[:, 0], idx_final[:, 1]] = 0  # null the indices
+            other_resps = other_resps.to(y.device)  # have to move other_resps to cuda if necessary
+            y_other = self.other_modulator(other_resps)
+            y_other = y_other[idx_final[:, 0], idx_final[:, 1]].reshape(-1, self.outdims)
+            if self.other_combine_addition:
+                y += y_other
+            else:
+                y *= y_other
+
+        # add predictions from modulator for responses to previous image
+        if self.prev_resps:
+            prev_resps = kwargs["prev_resps"].to(y.device)
+            y_prev = self.prev_modulator(prev_resps)
+            if self.prev_combine_addition:
+                y += y_prev
+            else:
+                y *= y_prev
+
+        return y
 
 
 class RemappedGaussian2d(FullGaussian2d):
@@ -1329,12 +1508,12 @@ class SelfAttention2d(nn.Module):
     """
 
     def __init__(
-            self,
-            in_shape,
-            outdims,
-            bias,
-            position_encoding=True,
-            **kwargs,
+        self,
+        in_shape,
+        outdims,
+        bias,
+        position_encoding=True,
+        **kwargs,
     ):
 
         super().__init__()
@@ -1385,23 +1564,24 @@ class SelfAttention2d(nn.Module):
         Initializes the mean, and sigma of the Gaussian readout along with the features weights
         """
         c, w, h = self.in_shape
-        self._features = Parameter(
-            torch.Tensor(1, c, self.outdims)
-        )
+        self._features = Parameter(torch.Tensor(1, c, self.outdims))
         self._features.data.fill_(1 / self.in_shape[0])
 
-        self.neuron_query = Parameter(
-            torch.Tensor(1, c, self.outdims)
-        )
+        self.neuron_query = Parameter(torch.Tensor(1, c, self.outdims))
         self.neuron_query.data.fill_(1 / self.in_shape[0])
 
         if self.use_position_embedding:
-            self.position_embedding = PositionalEncoding2D(d_model=c, max_len=w,)
+            self.position_embedding = PositionalEncoding2D(
+                d_model=c,
+                max_len=w,
+            )
 
         if self.bias is not None:
             self.bias.data.fill_(0)
 
-    def initialize_features(self,):
+    def initialize_features(
+        self,
+    ):
         """
         The internal attribute `_original_features` in this function denotes whether this instance of the FullGuassian2d
         learns the original features (True) or if it uses a copy of the features from another instance of FullGaussian2d
@@ -1559,7 +1739,7 @@ class DeterministicGaussian2d(nn.Module):
             mu = self.mu + shift[None, ...]
         mean = mu.view(self.outdims, 1, 1, -1)
         pdf = self.grid - mean
-        pdf = torch.sum(pdf ** 2, dim=-1) / variances
+        pdf = torch.sum(pdf**2, dim=-1) / variances
         pdf = torch.exp(-0.5 * pdf)
         # normalize to sum=1
         pdf = pdf / torch.sum(pdf, dim=(1, 2), keepdim=True)
@@ -1571,7 +1751,7 @@ class DeterministicGaussian2d(nn.Module):
         """
         self.mu.data.uniform_(-self.init_mu_range, self.init_mu_range)
 
-        self.log_var.data.fill_(np.log(self.init_sigma ** 2))
+        self.log_var.data.fill_(np.log(self.init_sigma**2))
 
         self.features.data.fill_(1 / self.in_shape[0])
 
