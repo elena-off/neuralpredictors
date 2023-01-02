@@ -1102,6 +1102,21 @@ class FullGaussian2dModulators(FullGaussian2d):
         source_grid (numpy.array):
                 Source grid for the grid_mean_predictor.
                 Needs to be of size neurons x grid_mean_predictor[input_dimensions]
+        prev_resps:  Boolean - whether to include the responses to the previous images with a modulator
+        prev_hidden_layers: int- number of hidden layers in the previous responses modulator
+        prev_hidden_features: int- number of hidden features in the previous responses modulator
+        prev_combine_addition: Boolean - whether to combine the results of the previous responses modulator via addition (True) or multiplication (False)
+        bias_prev: Boolean - whether to have a bias in the previous responses modulator
+        other_resps:  Boolean - whether to include the responses to another presentation of the same image with a modulator
+        other_hidden_layers: int- number of hidden layers in the other responses modulator
+        other_hidden_features: int- number of hidden features in the other responses modulator
+        other_combine_addition: Boolean - whether to combine the results of the other responses modulator via addition (True) or multiplication (False)
+        context_resps:  Boolean - whether to include the other responses to the input image with a modulator
+        context_hidden_layers: int- number of hidden layers in the context responses modulator
+        context_hidden_features: int- number of hidden features in the context responses modulator
+        context_combine_addition: Boolean - whether to combine the results of the context responses modulator via addition (True) or multiplication (False)
+        bias_context: Boolean - whether to have a bias in the context responses modulator
+        n_neurons: int array - how many neurons are from each session, used in context modulator to only input the responses from the same session
 
     """
 
@@ -1125,7 +1140,7 @@ class FullGaussian2dModulators(FullGaussian2d):
         n_neurons=None,
         **kwargs,
     ):
-        print("new readout!")
+
         self.prev_resps = prev_resps
         self.prev_hidden_layers = prev_hidden_layers
         self.prev_hidden_features = prev_hidden_features
@@ -1160,9 +1175,9 @@ class FullGaussian2dModulators(FullGaussian2d):
             self.initialize_context_modulator()
 
         if self.n_neurons is not None:
-            n_neurons = self.n_neurons[0]
+            n_neurons = self.n_neurons[0]  # get number of neurons that were in each session
             mask = np.zeros((self.outdims, self.outdims))
-            for i in np.arange(len(n_neurons) - 1):
+            for i in np.arange(len(n_neurons) - 1):  # make mask so all neurons from other sessions can be zeroed out
                 mask[n_neurons[i] : n_neurons[i + 1], n_neurons[i] : n_neurons[i + 1]] = 1
             self.mask = mask
         else:
