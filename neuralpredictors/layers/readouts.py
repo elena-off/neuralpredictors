@@ -1141,7 +1141,6 @@ class FullGaussian2dModulators(FullGaussian2d):
         self.context_combine_addition = context_combine_addition
         self.bias_context = bias_context
         self.n_neurons = n_neurons
-        print(self.n_neurons)
 
         super().__init__(*args, **kwargs)
 
@@ -1159,6 +1158,15 @@ class FullGaussian2dModulators(FullGaussian2d):
             print("context combine addition:")
             print(self.context_combine_addition)
             self.initialize_context_modulator()
+
+        if self.n_neurons is not None:
+            n_neurons = self.n_neurons[0]
+            mask = np.zeros((self.outdims, self.outdims))
+            for i in np.arange(len(n_neurons) - 1):
+                mask[n_neurons[i] : n_neurons[i + 1], n_neurons[i] : n_neurons[i + 1]] = 1
+            self.mask = mask
+        else:
+            self.mask = None
 
     def context_modulator_l1(self):
         """
@@ -1306,9 +1314,6 @@ class FullGaussian2dModulators(FullGaussian2d):
             y = F.grid_sample(x, grid, align_corners=self.align_corners)
             y = (y.squeeze(-1) * feat).sum(1).view(N, outdims)
 
-        if self.bias is not None:
-            y = y + bias
-
         if multiplex:
             if crop_edge_px:
                 y = y[:, crop_edge_px:-crop_edge_px, crop_edge_px:-crop_edge_px, :]
@@ -1330,12 +1335,10 @@ class FullGaussian2dModulators(FullGaussian2d):
             )  # find indices that need to be nulled
             targets[idx_final[:, 0], idx_final[:, 1]] = 0  # null the indices
             if self.n_neurons is not None:
-                n_neurons = self.n_neurons[0]
-                mask = np.zeros((self.outdims, self.outdims))
-                for i in np.arange(len(n_neurons) - 1):
-                    mask[n_neurons[i] : n_neurons[i + 1], n_neurons[i] : n_neurons[i + 1]] = 1
-                mask = np.tile(mask, (N, 1))
-                targets = (targets * mask).float()
+                mask = self.mask
+                targets = (targets.reshape(-1, self.outdims, self.outdims) * torch.Tensor(mask)).reshape(
+                    -1, self.outdims
+                )  # apply mask to targets
             targets = targets.to(y.device)  # have to move targets to cuda if necessary
             y_context = self.context_modulator(targets)
             y_context = y_context[idx_final[:, 0], idx_final[:, 1]].reshape(
@@ -1371,6 +1374,9 @@ class FullGaussian2dModulators(FullGaussian2d):
                 y += y_prev
             else:
                 y *= y_prev
+
+        if self.bias is not None:
+            y = y + bias
 
         return y
 
