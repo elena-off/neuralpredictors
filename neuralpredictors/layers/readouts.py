@@ -1104,22 +1104,26 @@ class FullGaussian2dModulators(FullGaussian2d):
                 Needs to be of size neurons x grid_mean_predictor[input_dimensions]
         prev_resps:  Boolean - whether to include the responses to the previous images with a modulator
         prev_hidden_layers: int- number of hidden layers in the previous responses modulator
-        prev_hidden_features: int- number of hidden features in the previous responses modulator
+        prev_hidden_features: int or list- number of hidden features in the previous responses modulator, either one int for all layers or a list
         prev_combine_addition: Boolean - whether to combine the results of the previous responses modulator via addition (True) or multiplication (False)
         prev_self: Boolean - whether only the previous response of the same neuron is put into modulator
         prev_minus_self: Boolean - whether only the previous responses of all other neurons are input into modulator
-        bias_prev: Boolean - whether to have a bias in the previous responses modulator
+        prev_final_nonlin: Boolean- whether to have a final nonlinearity (ELU) in the previous responses modulator
+        prev_hidden_bias: Boolean - whether to have a bias in the hidden layers of the previous responses modulator
+        prev_output_bias: Boolean - whether to have a bias in the output layer of the previous responses modulator
         other_resps:  Boolean - whether to include the responses to another presentation of the same image with a modulator
         other_hidden_layers: int- number of hidden layers in the other responses modulator
         other_hidden_features: int- number of hidden features in the other responses modulator
         other_combine_addition: Boolean - whether to combine the results of the other responses modulator via addition (True) or multiplication (False)
         context_resps:  Boolean - whether to include the other responses to the input image with a modulator
         context_hidden_layers: int- number of hidden layers in the context responses modulator
-        context_hidden_features: int- number of hidden features in the context responses modulator
+        context_hidden_features: int or list- number of hidden features in the context responses modulator, either one int for all layers or a list
         context_combine_addition: Boolean - whether to combine the results of the context responses modulator via addition (True) or multiplication (False)
-        bias_context: Boolean - whether to have a bias in the context responses modulator
-        n_neurons: int array - how many neurons are from each session, used in context modulator to only input the responses from the same session
         context_session: Boolean - if True, zero out context neurons from all other sessions using n_neurons
+        context_final_nonlin: Boolean- whether to have a final nonlinearity (ELU) in the context responses modulator
+        context_hidden_bias: Boolean - whether to have a bias in the hidden layers of the previous responses modulator
+        context_output_bias: Boolean - whether to have a bias in the output layer of the previous responses modulator
+        n_neurons: int array - how many neurons are from each session, used in context modulator to only input the responses from the same session
 
     """
 
@@ -1132,7 +1136,9 @@ class FullGaussian2dModulators(FullGaussian2d):
         prev_combine_addition=False,
         prev_self=False,
         prev_minus_self=False,
-        bias_prev=True,
+        prev_final_nonlin=True,
+        prev_hidden_bias=True,
+        prev_output_bias=True,
         other_resps=False,
         other_hidden_layers=1,
         other_hidden_features=10,
@@ -1141,8 +1147,10 @@ class FullGaussian2dModulators(FullGaussian2d):
         context_hidden_layers=1,
         context_hidden_features=10,
         context_combine_addition=False,
-        bias_context=True,
         context_session=False,
+        context_final_nonlin=True,
+        context_hidden_bias=True,
+        context_output_bias=True,
         n_neurons=None,
         **kwargs,
     ):
@@ -1153,7 +1161,9 @@ class FullGaussian2dModulators(FullGaussian2d):
         self.prev_combine_addition = prev_combine_addition
         self.prev_self = prev_self
         self.prev_minus_self = prev_minus_self
-        self.bias_prev = bias_prev
+        self.prev_final_nonlin = prev_final_nonlin
+        self.prev_hidden_bias = prev_hidden_bias
+        self.prev_output_bias = prev_output_bias
         self.other_resps = other_resps
         self.other_hidden_layers = other_hidden_layers
         self.other_hidden_features = other_hidden_features
@@ -1162,7 +1172,9 @@ class FullGaussian2dModulators(FullGaussian2d):
         self.context_hidden_layers = context_hidden_layers
         self.context_hidden_features = context_hidden_features
         self.context_combine_addition = context_combine_addition
-        self.bias_context = bias_context
+        self.context_final_nonlin = context_final_nonlin
+        self.context_hidden_bias = context_hidden_bias
+        self.context_output_bias = context_output_bias
         self.n_neurons = n_neurons
         self.context_session = context_session
 
@@ -1171,6 +1183,11 @@ class FullGaussian2dModulators(FullGaussian2d):
         if self.prev_resps:
             print("prev combine addition:")
             print(self.prev_combine_addition)
+            if isinstance(self.prev_hidden_features,int): #make list if only int is given
+                self.prev_hidden_features = [self.prev_hidden_features]*self.prev_hidden_layers
+            else:
+                if len(self.prev_hidden_features) != self.prev_hidden_layers:
+                    raise ValueError("prev_hidden_features must be an int or a list with the length of number of hidden layers (prev_hidden_layers)")
             self.initialize_prev_modulator()
 
         if self.other_resps:
@@ -1188,6 +1205,11 @@ class FullGaussian2dModulators(FullGaussian2d):
             self.idx = torch.nonzero(
                 ~self.diagonal_mask
             )  # index of reverse of diagonal mask to speed up extraction of predicted answers from context_modulator
+            if isinstance(self.context_hidden_features,int): #make list if only int is given
+                self.context_hidden_features = [self.context_hidden_features]*self.context_hidden_layers
+            else:
+                if len(self.context_hidden_features) != self.context_hidden_layers:
+                    raise ValueError("context_hidden_features must be an int or a list with the length of number of hidden layers (context_hidden_layers)")
             self.initialize_context_modulator()
 
         if (
@@ -1203,13 +1225,18 @@ class FullGaussian2dModulators(FullGaussian2d):
             raise ValueError("n_neurons is not in dataloader, but is necessary for context_session = True")
 
         if (
-            self.prev_self or self.prev_minus_self and (self.n_neurons is None)
+            (self.prev_self or self.prev_minus_self) and (self.n_neurons is None)
         ):  # error if n_neurons is None but needs to be used for prev options
             raise ValueError("n_neurons is not in dataloader, but is necessary for prev_self and prev_minus_self")
 
         if self.prev_resps and self.n_neurons is None:  # warn user if n_neurons is not there for previous responses
             warnings.warn(
                 "If you are using the combined dataloader, please add n_neurons for the correct functioning of the previous responses modulator"
+            )
+
+        if ("bias_context" in kwargs) or ("bias_prev" in kwargs):  # warn user if they are using deprecated bias_context or bias_prev
+            warnings.warn(
+                "bias_context and bias_prev are deprecated, please use "
             )
 
         # prev_self:
@@ -1279,8 +1306,8 @@ class FullGaussian2dModulators(FullGaussian2d):
         layers = [
             nn.Linear(
                 self.outdims,
-                self.prev_hidden_features if self.prev_hidden_layers > 0 else self.outdims,
-                bias=self.bias_prev,
+                self.prev_hidden_features[0] if self.prev_hidden_layers > 0 else self.outdims,
+                bias=self.prev_hidden_bias if self.prev_hidden_layers > 0 else self.prev_output_bias,
             )
         ]
         for i in range(self.prev_hidden_layers):
@@ -1288,13 +1315,14 @@ class FullGaussian2dModulators(FullGaussian2d):
                 [
                     nn.ELU(),
                     nn.Linear(
-                        self.prev_hidden_features,
-                        self.prev_hidden_features if i < self.prev_hidden_layers - 1 else self.outdims,
-                        bias=self.bias_prev,
+                        self.prev_hidden_features[i],
+                        self.prev_hidden_features[i+1] if i < self.prev_hidden_layers - 1 else self.outdims,
+                        bias=self.prev_hidden_bias if i < self.prev_hidden_layers - 1 else self.prev_output_bias, #use self.prev_output_bias for last layer
                     ),
                 ]
             )
-        layers.append(nn.ELU())
+        if self.prev_final_nonlin: #only use a final nonlinearity in modulator if this variable is True
+            layers.append(nn.ELU())
         self.prev_modulator = nn.Sequential(*layers)
         print("prev modulator:")
         print(self.prev_modulator)
@@ -1320,8 +1348,8 @@ class FullGaussian2dModulators(FullGaussian2d):
         layers = [
             nn.Linear(
                 self.outdims,
-                self.context_hidden_features if self.context_hidden_layers > 0 else self.outdims,
-                bias=self.bias_context,
+                self.context_hidden_features[0] if self.context_hidden_layers > 0 else self.outdims,
+                bias=self.context_hidden_bias if self.context_hidden_layers > 0 else self.context_output_bias,
             )
         ]
         for i in range(self.context_hidden_layers):
@@ -1329,13 +1357,14 @@ class FullGaussian2dModulators(FullGaussian2d):
                 [
                     nn.ELU(),
                     nn.Linear(
-                        self.context_hidden_features,
-                        self.context_hidden_features if i < self.context_hidden_layers - 1 else self.outdims,
-                        bias=self.bias_context,
+                        self.context_hidden_features[i],
+                        self.context_hidden_features[i+1] if i < self.context_hidden_layers - 1 else self.outdims,
+                        bias=self.context_hidden_bias if i < self.context_hidden_layers - 1 else self.context_output_bias, #use self.prev_output_bias for last layer
                     ),
                 ]
             )
-        layers.append(nn.ELU())
+        if self.context_final_nonlin: #only use a final nonlinearity in modulator if this variable is True
+            layers.append(nn.ELU())
         self.context_modulator = nn.Sequential(*layers)
         print("context modulator:")
         print(self.context_modulator)
@@ -1484,7 +1513,7 @@ class FullGaussian2dModulators(FullGaussian2d):
                     )
                     prev_resps = (prev_resps.reshape(-1, self.outdims, self.outdims) * self.diag_mask_prev).reshape(
                         -1, self.outdims
-                    )  # null diagonals so each neurons doesn't get its own response
+                    )  # null diagonals so each neurons doesn't get its own response or only its own response, depending on prev_self or prev_minus_self
                     prev_resps = (prev_resps.reshape(-1, self.outdims, self.outdims) * session_mask).reshape(
                         -1, self.outdims
                     )  # apply session mask to targets
