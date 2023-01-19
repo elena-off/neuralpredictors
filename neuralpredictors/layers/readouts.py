@@ -1183,11 +1183,13 @@ class FullGaussian2dModulators(FullGaussian2d):
         if self.prev_resps:
             print("prev combine addition:")
             print(self.prev_combine_addition)
-            if isinstance(self.prev_hidden_features,int): #make list if only int is given
-                self.prev_hidden_features = [self.prev_hidden_features]*self.prev_hidden_layers
+            if isinstance(self.prev_hidden_features, int):  # make list if only int is given
+                self.prev_hidden_features = [self.prev_hidden_features] * self.prev_hidden_layers
             else:
-                if len(self.prev_hidden_features) != self.prev_hidden_layers:
-                    raise ValueError("prev_hidden_features must be an int or a list with the length of number of hidden layers (prev_hidden_layers)")
+                if (self.prev_hidden_layers != 0) and (len(self.prev_hidden_features) != self.prev_hidden_layers):
+                    raise ValueError(
+                        "prev_hidden_features must be an int or a list with the length of number of hidden layers (prev_hidden_layers)"
+                    )
             self.initialize_prev_modulator()
 
         if self.other_resps:
@@ -1205,11 +1207,15 @@ class FullGaussian2dModulators(FullGaussian2d):
             self.idx = torch.nonzero(
                 ~self.diagonal_mask
             )  # index of reverse of diagonal mask to speed up extraction of predicted answers from context_modulator
-            if isinstance(self.context_hidden_features,int): #make list if only int is given
-                self.context_hidden_features = [self.context_hidden_features]*self.context_hidden_layers
+            if isinstance(self.context_hidden_features, int):  # make list if only int is given
+                self.context_hidden_features = [self.context_hidden_features] * self.context_hidden_layers
             else:
-                if len(self.context_hidden_features) != self.context_hidden_layers:
-                    raise ValueError("context_hidden_features must be an int or a list with the length of number of hidden layers (context_hidden_layers)")
+                if (self.context_hidden_layers != 0) and (
+                    len(self.context_hidden_features) != self.context_hidden_layers
+                ):
+                    raise ValueError(
+                        "context_hidden_features must be an int or a list with the length of number of hidden layers (context_hidden_layers)"
+                    )
             self.initialize_context_modulator()
 
         if (
@@ -1224,8 +1230,8 @@ class FullGaussian2dModulators(FullGaussian2d):
         ):  # error if n_neurons is None but needs to be used for context_session
             raise ValueError("n_neurons is not in dataloader, but is necessary for context_session = True")
 
-        if (
-            (self.prev_self or self.prev_minus_self) and (self.n_neurons is None)
+        if (self.prev_self or self.prev_minus_self) and (
+            self.n_neurons is None
         ):  # error if n_neurons is None but needs to be used for prev options
             raise ValueError("n_neurons is not in dataloader, but is necessary for prev_self and prev_minus_self")
 
@@ -1234,10 +1240,10 @@ class FullGaussian2dModulators(FullGaussian2d):
                 "If you are using the combined dataloader, please add n_neurons for the correct functioning of the previous responses modulator"
             )
 
-        if ("bias_context" in kwargs) or ("bias_prev" in kwargs):  # warn user if they are using deprecated bias_context or bias_prev
-            warnings.warn(
-                "bias_context and bias_prev are deprecated, please use "
-            )
+        if ("bias_context" in kwargs) or (
+            "bias_prev" in kwargs
+        ):  # warn user if they are using deprecated bias_context or bias_prev
+            warnings.warn("bias_context and bias_prev are deprecated, please use ")
 
         # prev_self:
         if self.prev_self and self.prev_minus_self:  # error if both prev_self and prev_minus_self are True
@@ -1316,12 +1322,14 @@ class FullGaussian2dModulators(FullGaussian2d):
                     nn.ELU(),
                     nn.Linear(
                         self.prev_hidden_features[i],
-                        self.prev_hidden_features[i+1] if i < self.prev_hidden_layers - 1 else self.outdims,
-                        bias=self.prev_hidden_bias if i < self.prev_hidden_layers - 1 else self.prev_output_bias, #use self.prev_output_bias for last layer
+                        self.prev_hidden_features[i + 1] if i < self.prev_hidden_layers - 1 else self.outdims,
+                        bias=self.prev_hidden_bias
+                        if i < self.prev_hidden_layers - 1
+                        else self.prev_output_bias,  # use self.prev_output_bias for last layer
                     ),
                 ]
             )
-        if self.prev_final_nonlin: #only use a final nonlinearity in modulator if this variable is True
+        if self.prev_final_nonlin:  # only use a final nonlinearity in modulator if this variable is True
             layers.append(nn.ELU())
         self.prev_modulator = nn.Sequential(*layers)
         print("prev modulator:")
@@ -1358,12 +1366,14 @@ class FullGaussian2dModulators(FullGaussian2d):
                     nn.ELU(),
                     nn.Linear(
                         self.context_hidden_features[i],
-                        self.context_hidden_features[i+1] if i < self.context_hidden_layers - 1 else self.outdims,
-                        bias=self.context_hidden_bias if i < self.context_hidden_layers - 1 else self.context_output_bias, #use self.prev_output_bias for last layer
+                        self.context_hidden_features[i + 1] if i < self.context_hidden_layers - 1 else self.outdims,
+                        bias=self.context_hidden_bias
+                        if i < self.context_hidden_layers - 1
+                        else self.context_output_bias,  # use self.prev_output_bias for last layer
                     ),
                 ]
             )
-        if self.context_final_nonlin: #only use a final nonlinearity in modulator if this variable is True
+        if self.context_final_nonlin:  # only use a final nonlinearity in modulator if this variable is True
             layers.append(nn.ELU())
         self.context_modulator = nn.Sequential(*layers)
         print("context modulator:")
