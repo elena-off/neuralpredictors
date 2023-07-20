@@ -3,6 +3,7 @@ from collections import OrderedDict
 
 import numpy as np
 import torch
+import math
 from torch import nn as nn
 from torch.nn import ModuleDict
 from torch.nn import Parameter
@@ -1111,18 +1112,20 @@ class FullGaussian2dModulators(FullGaussian2d):
         prev_final_nonlin: Boolean- whether to have a final nonlinearity (ELU) in the previous responses modulator
         prev_hidden_bias: Boolean - whether to have a bias in the hidden layers of the previous responses modulator
         prev_output_bias: Boolean - whether to have a bias in the output layer of the previous responses modulator
-        other_resps:  Boolean - whether to include the responses to another presentation of the same image with a modulator
-        other_hidden_layers: int- number of hidden layers in the other responses modulator
-        other_hidden_features: int- number of hidden features in the other responses modulator
-        other_combine_addition: Boolean - whether to combine the results of the other responses modulator via addition (True) or multiplication (False)
+        prev_pos_len: Int- if 0, no positional encoding is added to the previous modulator; if unequal 0, positional encoding of length l of the trial position is input
         context_resps:  Boolean - whether to include the other responses to the input image with a modulator
         context_hidden_layers: int- number of hidden layers in the context responses modulator
         context_hidden_features: int or list- number of hidden features in the context responses modulator, either one int for all layers or a list
         context_combine_addition: Boolean - whether to combine the results of the context responses modulator via addition (True) or multiplication (False)
         context_session: Boolean - if True, zero out context neurons from all other sessions using n_neurons
+        context_other_sessions: Boolean - if True, zero out only context neurons from own session
+        context_nonlin: Boolean- whether to have a nonlinearity (ELU) in the hidden layers of the context responses modulator
         context_final_nonlin: Boolean- whether to have a final nonlinearity (ELU) in the context responses modulator
         context_hidden_bias: Boolean - whether to have a bias in the hidden layers of the previous responses modulator
         context_output_bias: Boolean - whether to have a bias in the output layer of the previous responses modulator
+        context_residuals: Boolean - if True, not the actual answers but the residuals (actual answers minus predicted answers of readout) are input into modulator
+        context_pos_len: Int- if 0, no positional encoding is added to the context modulator; if unequal 0, positional encoding of length l of the trial position is input
+        context_separate_mods: Boolean- if True, there are separate modulators for each session
         n_neurons: int array - how many neurons are from each session, used in context modulator to only input the responses from the same session
 
     """
@@ -1139,18 +1142,21 @@ class FullGaussian2dModulators(FullGaussian2d):
         prev_final_nonlin=True,
         prev_hidden_bias=True,
         prev_output_bias=True,
-        other_resps=False,
-        other_hidden_layers=1,
-        other_hidden_features=10,
-        other_combine_addition=False,
+        prev_pos_len=0,
         context_resps=False,
         context_hidden_layers=1,
         context_hidden_features=10,
         context_combine_addition=False,
         context_session=False,
+        context_other_sessions=False,
+        context_nonlin=True,
         context_final_nonlin=True,
         context_hidden_bias=True,
         context_output_bias=True,
+        context_residuals=False,
+        context_pos_len=0,
+        context_pos_only=False,
+        context_separate_mods=False,
         n_neurons=None,
         **kwargs,
     ):
@@ -1164,26 +1170,29 @@ class FullGaussian2dModulators(FullGaussian2d):
         self.prev_final_nonlin = prev_final_nonlin
         self.prev_hidden_bias = prev_hidden_bias
         self.prev_output_bias = prev_output_bias
-        self.other_resps = other_resps
-        self.other_hidden_layers = other_hidden_layers
-        self.other_hidden_features = other_hidden_features
-        self.other_combine_addition = other_combine_addition
+        self.prev_pos_len = prev_pos_len
         self.context_resps = context_resps
         self.context_hidden_layers = context_hidden_layers
         self.context_hidden_features = context_hidden_features
         self.context_combine_addition = context_combine_addition
         self.context_final_nonlin = context_final_nonlin
+        self.context_nonlin = context_nonlin
         self.context_hidden_bias = context_hidden_bias
         self.context_output_bias = context_output_bias
+        self.context_pos_len = context_pos_len
+        self.context_pos_only = context_pos_only
         self.n_neurons = n_neurons
+        self.context_separate_mods = context_separate_mods
         self.context_session = context_session
+        self.context_other_sessions = context_other_sessions
+        self.context_residuals = context_residuals
 
         super().__init__(*args, **kwargs)
 
         if self.prev_resps:
             print("prev combine addition:")
             print(self.prev_combine_addition)
-            if isinstance(self.prev_hidden_features, int):  # make list if only int is given
+            if isinstance(self.prev_hidden_features, int):  # make list of hidden features if only int is given
                 self.prev_hidden_features = [self.prev_hidden_features] * self.prev_hidden_layers
             else:
                 if (self.prev_hidden_layers != 0) and (len(self.prev_hidden_features) != self.prev_hidden_layers):
@@ -1192,22 +1201,17 @@ class FullGaussian2dModulators(FullGaussian2d):
                     )
             self.initialize_prev_modulator()
 
-        if self.other_resps:
-            print("other combine addition:")
-            print(self.other_combine_addition)
-            self.initialize_other_modulator()
-
         if self.context_resps:
             print("context combine addition:")
             print(self.context_combine_addition)
-            # mask for zeroing out the neuron response that is being predicted so as to not give the model the correct answer
+            # make mask for zeroing out the neuron response that is being predicted so as to not give the model the correct answer
             self.diagonal_mask = torch.nn.parameter.Parameter(
                 data=~torch.eye(self.outdims, dtype=torch.bool), requires_grad=False
             )
             self.idx = torch.nonzero(
                 ~self.diagonal_mask
-            )  # index of reverse of diagonal mask to speed up extraction of predicted answers from context_modulator
-            if isinstance(self.context_hidden_features, int):  # make list if only int is given
+            )  # save indices of reverse of diagonal mask to speed up extraction of predicted answers from context_modulator
+            if isinstance(self.context_hidden_features, int):  # make list of hidden features if only int is given
                 self.context_hidden_features = [self.context_hidden_features] * self.context_hidden_layers
             else:
                 if (self.context_hidden_layers != 0) and (
@@ -1216,10 +1220,15 @@ class FullGaussian2dModulators(FullGaussian2d):
                     raise ValueError(
                         "context_hidden_features must be an int or a list with the length of number of hidden layers (context_hidden_layers)"
                     )
-            self.initialize_context_modulator()
+            if context_separate_mods:
+                self.initialize_context_mod_dict()
+            else:
+                self.initialize_context_modulator()
 
         if (
-            self.context_resps and self.n_neurons is not None and (not self.context_session)
+            self.context_resps
+            and self.n_neurons is not None
+            and (not self.context_session or self.context_other_sessions)
         ):  # warn user if n_neurons is there but not being used
             warnings.warn(
                 "context_session is False, n_neurons will not be used to zero out context responses from other sessions"
@@ -1235,6 +1244,11 @@ class FullGaussian2dModulators(FullGaussian2d):
         ):  # error if n_neurons is None but needs to be used for prev options
             raise ValueError("n_neurons is not in dataloader, but is necessary for prev_self and prev_minus_self")
 
+        if (self.context_separate_mods) and (
+            self.n_neurons is None
+        ):  # error if n_neurons is None but needs to be used for context separate mods
+            raise ValueError("n_neurons is not in dataloader, but is necessary for context_separate_mods")
+
         if self.prev_resps and self.n_neurons is None:  # warn user if n_neurons is not there for previous responses
             warnings.warn(
                 "If you are using the combined dataloader, please add n_neurons for the correct functioning of the previous responses modulator"
@@ -1245,13 +1259,19 @@ class FullGaussian2dModulators(FullGaussian2d):
         ):  # warn user if they are using deprecated bias_context or bias_prev
             warnings.warn("bias_context and bias_prev are deprecated, please use ")
 
-        # prev_self:
         if self.prev_self and self.prev_minus_self:  # error if both prev_self and prev_minus_self are True
             raise ValueError("prev_self and prev_minus_self cannot be True at the same time")
 
-        if self.n_neurons is not None:
+        if (
+            self.context_session and self.context_other_sessions
+        ):  # error if both context_session and context_other_sessions are True
+            raise ValueError("context_session and context_other_sessions cannot be True at the same time")
+
+        if self.n_neurons is not None:  # make masks to zero out unwanted responses before passing responses to readout
             n_neurons = self.n_neurons[0]  # get number of neurons that were in each session
-            if context_session:  # mask for context resps if only one session should be used as input
+            if (
+                context_session or context_other_sessions
+            ):  # mask for context resps if only one session should be used as input
                 session_mask = torch.nn.parameter.Parameter(
                     data=torch.zeros(self.outdims, self.outdims), requires_grad=False
                 )
@@ -1259,11 +1279,37 @@ class FullGaussian2dModulators(FullGaussian2d):
                     len(n_neurons) - 1
                 ):  # make mask so all neurons from other sessions can be zeroed out
                     session_mask[n_neurons[i] : n_neurons[i + 1], n_neurons[i] : n_neurons[i + 1]] = 1
-                self.session_mask_context = session_mask
+                if context_pos_len:
+                    pos_mask = torch.nn.parameter.Parameter(
+                        data=torch.zeros(self.outdims, context_pos_len * (len(n_neurons) - 1)), requires_grad=False
+                    )
+                    for i in torch.arange(
+                        len(n_neurons) - 1
+                    ):  # make mask so all positions from other sessions can be zeroed out
+                        pos_mask[n_neurons[i] : n_neurons[i + 1], i * context_pos_len : (i + 1) * context_pos_len] = 1
+                    self.pos_mask_context = pos_mask
+                if context_session:
+                    self.session_mask_context = session_mask
+                else:  # if you have other_sessions, only the current session must be zeroed out
+                    copy = session_mask.clone()
+                    session_mask[copy == 0] = 1
+                    session_mask[copy != 0] = 0
+                    self.session_mask_context = session_mask
+                    if context_pos_len:  # also flip position mask in case of other_sessions
+                        copy = pos_mask.clone()
+                        pos_mask[copy == 0] = 1
+                        pos_mask[copy != 0] = 0
+                        self.pos_mask_context = pos_mask
             if prev_resps:  # mask for prev resps
                 if (
                     not self.prev_self and not self.prev_minus_self
                 ):  # if neither self.prev nor self.minus_prev are True, the mask needs to only be applied for each session
+                    if prev_pos_len:
+                        pos_mask = torch.nn.parameter.Parameter(data=torch.eye(len(n_neurons) - 1), requires_grad=False)
+                        pos_mask = torch.repeat_interleave(
+                            pos_mask[:, :, None], repeats=self.prev_pos_len, axis=1
+                        ).reshape(-1, (len(n_neurons) - 1) * self.prev_pos_len)
+                        self.pos_mask_prev = pos_mask.to("cuda")
                     session_mask = torch.nn.parameter.Parameter(
                         data=torch.zeros((len(n_neurons) - 1, self.outdims)), requires_grad=False
                     )
@@ -1296,11 +1342,33 @@ class FullGaussian2dModulators(FullGaussian2d):
                         )
                         self.diag_idx = torch.nonzero(self.diag_mask_prev)
 
+        if context_pos_len:  # compute positional encoding once and save in tensor to speed up training
+            if context_pos_len == 1:  # separate simple encoding for length of just 1
+                self.pos_enc = torch.arange(1, 16) / 15
+            else:
+                self.pos_enc = self.positionalencoding(
+                    self.context_pos_len, 15
+                )  # get encodings of all positions for later
+
+        if prev_pos_len:  # compute positional encoding once and save in tensor to speed up training
+            if prev_pos_len == 1:  # separate simple encoding for length of just 1
+                self.pos_enc = torch.arange(1, 16) / 15
+            else:
+                self.pos_enc = self.positionalencoding(
+                    self.prev_pos_len, 15
+                )  # get encodings of all positions for later
+
     def context_modulator_l1(self):
         """
         Returns the l1 regularization term of the context modulator weights
         """
         return sum(p.abs().sum() for p in self.context_modulator.parameters())
+
+    def context_modulator_l2(self):
+        """
+        Returns the l2 regularization term of the context modulator weights
+        """
+        return torch.sqrt(sum(torch.sum(p**2) for p in self.context_modulator.parameters()))  # return L2-norm
 
     def prev_modulator_l1(self):
         """
@@ -1309,9 +1377,19 @@ class FullGaussian2dModulators(FullGaussian2d):
         return sum(p.abs().sum() for p in self.prev_modulator.parameters())
 
     def initialize_prev_modulator(self):
+        """
+        Initializes previous response modulator with all parameters starting with "prev_" passed to readout considered
+        """
+        if self.n_neurons is not None:  # get total number of neurons
+            num_neurons = len(self.n_neurons[0]) - 1
+        else:
+            num_neurons = self.outdims
+        # first layer separately
         layers = [
             nn.Linear(
-                self.outdims,
+                self.outdims
+                + self.prev_pos_len
+                * num_neurons,  # input is number of neurons plus number of sessions times length of trial position representation
                 self.prev_hidden_features[0] if self.prev_hidden_layers > 0 else self.outdims,
                 bias=self.prev_hidden_bias if self.prev_hidden_layers > 0 else self.prev_output_bias,
             )
@@ -1321,7 +1399,7 @@ class FullGaussian2dModulators(FullGaussian2d):
                 [
                     nn.ELU(),
                     nn.Linear(
-                        self.prev_hidden_features[i],
+                        self.prev_hidden_features[i],  # can adjust number of hidden features for each layer separately
                         self.prev_hidden_features[i + 1] if i < self.prev_hidden_layers - 1 else self.outdims,
                         bias=self.prev_hidden_bias
                         if i < self.prev_hidden_layers - 1
@@ -1332,38 +1410,82 @@ class FullGaussian2dModulators(FullGaussian2d):
         if self.prev_final_nonlin:  # only use a final nonlinearity in modulator if this variable is True
             layers.append(nn.ELU())
         self.prev_modulator = nn.Sequential(*layers)
+        # print structure of previous modulator for checking purposes
         print("prev modulator:")
         print(self.prev_modulator)
 
-    def initialize_other_modulator(self):
-        layers = [nn.Linear(self.outdims, self.other_hidden_features if self.other_hidden_layers > 0 else self.outdims)]
-        for i in range(self.other_hidden_layers):
-            layers.extend(
-                [
-                    nn.ELU(),
-                    nn.Linear(
-                        self.other_hidden_features,
-                        self.other_hidden_features if i < self.other_hidden_layers - 1 else self.outdims,
-                    ),
-                ]
-            )
-        layers.append(nn.ELU())
-        self.other_modulator = nn.Sequential(*layers)
-        print("other modulator:")
-        print(self.other_modulator)
+    def initialize_context_mod_dict(self):
+        """
+        Initializes context modulator dictionary for having a separate modulaotr for each session
+        """
+        self.context_mods = nn.ModuleDict()
+        n_neurons = self.n_neurons[0]
+        for i in range(len(n_neurons) - 1):
+            outdims = (n_neurons[i + 1] - n_neurons[i]).item()
+            sess_name = "Session " + str(i)
+            self.context_mods[sess_name] = self.return_context_modulator(outdims)
 
-    def initialize_context_modulator(self):
+    def return_context_modulator(self, sess_outdims):
+        """
+        make context response modulator with all parameters starting with "context_" passed to readout considered for context modulator dictionary
+        """
         layers = [
             nn.Linear(
-                self.outdims,
-                self.context_hidden_features[0] if self.context_hidden_layers > 0 else self.outdims,
+                self.outdims
+                + self.context_pos_len
+                * (
+                    len(self.n_neurons[0]) - 1
+                ),  # input is number of neurons plus number of sessions times length of trial position representation
+                self.context_hidden_features[0] if self.context_hidden_layers > 0 else sess_outdims,
                 bias=self.context_hidden_bias if self.context_hidden_layers > 0 else self.context_output_bias,
             )
         ]
         for i in range(self.context_hidden_layers):
+            if self.context_nonlin:  # only add ELU-nonlinearity if required
+                layers.extend([nn.ELU()])
             layers.extend(
                 [
-                    nn.ELU(),
+                    nn.Linear(
+                        self.context_hidden_features[i],
+                        self.context_hidden_features[i + 1] if i < self.context_hidden_layers - 1 else sess_outdims,
+                        bias=self.context_hidden_bias
+                        if i < self.context_hidden_layers - 1
+                        else self.context_output_bias,  # use self.prev_output_bias for last layer
+                    ),
+                ]
+            )
+        if self.context_final_nonlin:  # only use a final nonlinearity in modulator if this variable is True
+            layers.append(nn.ELU())
+        return nn.Sequential(*layers)
+
+    def initialize_context_modulator(self):
+        if self.context_pos_len:
+            if self.n_neurons is not None:
+                num_sessions = len(self.n_neurons[0]) - 1
+            else:
+                num_sessions = 1
+            if not self.context_pos_only:
+                input_num = self.outdims + self.context_pos_len * (
+                    num_sessions
+                )  # input is number of neurons plus number of sessions times length of trial position representation
+            else:  # only the trial position is input into the context modulator, no context responses
+                input_num = self.context_pos_len * num_sessions
+        else:
+            input_num = self.outdims
+        layers = [
+            nn.Linear(
+                input_num,  # input is number of neurons plus number of sessions times length of trial position representation
+                self.context_hidden_features[0]
+                if self.context_hidden_layers > 0
+                else self.outdims,  # can adjust number of hidden features for each layer separately
+                bias=self.context_hidden_bias if self.context_hidden_layers > 0 else self.context_output_bias,
+            )
+        ]
+        for i in range(self.context_hidden_layers):
+            if self.context_nonlin:  # only add ELU-nonlinearity if required
+                layers.extend([nn.ELU()])
+            layers.extend(
+                [
                     nn.Linear(
                         self.context_hidden_features[i],
                         self.context_hidden_features[i + 1] if i < self.context_hidden_layers - 1 else self.outdims,
@@ -1376,8 +1498,26 @@ class FullGaussian2dModulators(FullGaussian2d):
         if self.context_final_nonlin:  # only use a final nonlinearity in modulator if this variable is True
             layers.append(nn.ELU())
         self.context_modulator = nn.Sequential(*layers)
+        # print structure of context modulator for checking purposes
         print("context modulator:")
         print(self.context_modulator)
+
+    # function for getting positional encoding of trial position
+    def positionalencoding(self, d_model, length):
+        """
+        :param d_model: dimension of the model
+        :param length: length of positions
+        :return: length*d_model position matrix
+        """
+        if d_model % 2 != 0:
+            raise ValueError("Cannot use sin/cos positional encoding with " "odd dim (got dim={:d})".format(d_model))
+        pe = torch.zeros(length, d_model)
+        position = torch.arange(0, length).unsqueeze(1)
+        div_term = torch.exp((torch.arange(0, d_model, 2, dtype=torch.float) * -(math.log(10000.0) / d_model)))
+        pe[:, 0::2] = torch.sin(position.float() * div_term)
+        pe[:, 1::2] = torch.cos(position.float() * div_term)
+
+        return pe
 
     def forward(
         self, x, sample=None, shift=None, out_idx=None, multiplex=False, crop_edge_px=None, collapse=True, **kwargs
@@ -1457,56 +1597,115 @@ class FullGaussian2dModulators(FullGaussian2d):
             else:
                 # reshape responses into (N, Outdims, h, w)
                 y = y.permute(0, 3, 1, 2)
+                # add predictions from modulator for responses to previous image
 
-        # add other responses for same image
-        if self.context_resps:
-            if "context_zeroed" in kwargs:  # for context control
-                targets = kwargs["context_zeroed"]
-            else:
-                targets = kwargs["targets"]
+        # add modulation from MLP that receives other responses for same image to prediction from rest of network
+        if self.context_resps:  # get context responses from dataloader
+            targets = kwargs["targets"].to(y.device)  # have to move targets to cuda if necessary
+
+            if self.context_pos_len:  # get trial positions and the corresponding positional encodings
+                if "trial_positions" in kwargs:
+                    trial_pos = kwargs["trial_positions"].to(y.device)
+                    if self.n_neurons is not None:
+                        num_sessions = len(self.n_neurons[0]) - 1
+                    else:
+                        num_sessions = 1
+                    num_cols = num_sessions * self.context_pos_len
+                    trial_pos_enc = np.zeros((trial_pos.shape[0], num_cols))
+                    for row in np.arange(trial_pos.shape[0]):
+                        for session in np.arange(num_sessions):  # get positional encoding for each image
+                            if self.n_neurons is not None:
+                                col = int(self.n_neurons[0][session])
+                            else:
+                                col = 0
+                            trial_pos_enc[row][
+                                session * self.context_pos_len : (session + 1) * self.context_pos_len
+                            ] = self.pos_enc[int(trial_pos[row][col])]
+                    trial_pos_enc = (
+                        torch.repeat_interleave(
+                            torch.from_numpy(trial_pos_enc[:, :, None]).to(torch.float), repeats=self.outdims, axis=0
+                        )
+                        .reshape(-1, num_cols)
+                        .to(y.device)
+                    )
+                else:  # raise error if trial positions should be included, but are not passed to readout
+                    raise ValueError("trial_positions is not in dataloader, but is necessary for context_pos_len != 0")
+
+            if (
+                self.context_residuals
+            ):  # if residuals is True: input is difference of real answers & predictions from output
+                targets = targets.clone() - y.to(targets.device)
             targets = torch.repeat_interleave(targets[:, :, None], repeats=self.outdims, axis=0).reshape(
                 -1, self.outdims
-            )
-            targets = targets.to(y.device)  # have to move targets to cuda if necessary
+            )  # repeat targets to be able to zero out neuron response that is to be predicted
             targets = (targets.reshape(-1, self.outdims, self.outdims) * self.diagonal_mask).reshape(
                 -1, self.outdims
             )  # null diagonals so each neurons doesn't get its own response
-            if self.context_session:  # if only session-neurons should be used as input for modulator
+
+            if self.context_separate_mods:  # use separate modulators for each session
+                n_neurons = self.n_neurons[0]
+                targets = targets.reshape(-1, self.outdims, self.outdims)
+                y_context = torch.zeros(targets.shape)
+                for sess in np.arange(len(n_neurons) - 1):
+                    mod_input = targets[:, n_neurons[sess] : n_neurons[sess + 1]]
+                    sess_name = "Session " + str(sess)
+                    y_context_sess = self.context_mods[sess_name](mod_input)
+                    y_context[
+                        :, n_neurons[sess] : n_neurons[sess + 1], n_neurons[sess] : n_neurons[sess + 1]
+                    ] = y_context_sess
+                y_context = y_context.to(y.device)
+            elif (
+                self.context_session or self.context_other_sessions
+            ):  # if only neurons of same or of other sessions should be used as input for modulator, use mask
                 targets = (targets.reshape(-1, self.outdims, self.outdims) * self.session_mask_context).reshape(
                     -1, self.outdims
                 )  # apply session mask to targets
-            y_context = self.context_modulator(targets)
+                if self.context_pos_len:  # also zero out positions of session
+                    trial_pos_enc = (trial_pos_enc.reshape(-1, self.outdims, num_cols) * self.pos_mask_context).reshape(
+                        -1, num_cols
+                    )
+            # get predicted modulations
+            if self.context_pos_len:  # if trial position is to be input, add them to context modulator input
+                if not self.context_pos_only:
+                    y_context = self.context_modulator(torch.hstack((targets, trial_pos_enc)))
+                else:
+                    y_context = self.context_modulator(trial_pos_enc)
+            else:
+                if not self.context_separate_mods:
+                    y_context = self.context_modulator(targets)
+
             y_context = y_context.reshape(-1, self.outdims, self.outdims)[:, self.idx[:, 0], self.idx[:, 1]].reshape(
                 -1, self.outdims
-            )  # get the predictions from the respective neurons that were zeroed out
-            if self.context_combine_addition:
+            )  # extract the predictions from the respective neurons that were zeroed out
+
+            if (
+                self.context_combine_addition
+            ):  # combine modulation and previous prediction either by addition or multiplication
                 y += y_context
             else:
                 y *= y_context
 
-        if self.other_resps:
-            other_resps = kwargs["other_resps"]
-            other_resps = np.repeat(other_resps[:, :, None], repeats=self.outdims, axis=0).reshape(
-                -1, self.outdims
-            )  # repeat resps num_neuron number of times
-            idx_final = np.stack((np.arange(N * self.outdims), np.tile(np.arange(self.outdims), N)), axis=-1).reshape(
-                -1, 2
-            )  # find indices that need to be nulled
-            other_resps[idx_final[:, 0], idx_final[:, 1]] = 0  # null the indices
-            other_resps = other_resps.to(y.device)  # have to move other_resps to cuda if necessary
-            y_other = self.other_modulator(other_resps)
-            y_other = y_other[idx_final[:, 0], idx_final[:, 1]].reshape(-1, self.outdims)
-            if self.other_combine_addition:
-                y += y_other
-            else:
-                y *= y_other
-
-        # add predictions from modulator for responses to previous image
-        if self.prev_resps:
+        # add modulation from MLP that receives responses for previous image to prediction from rest of network
+        if self.prev_resps:  # get previous responses from dataloader
             prev_resps = kwargs["prev_resps"]
-            prev_resps = prev_resps.to(y.device)
+            prev_resps = prev_resps.to(y.device)  # have to move to cuda if necessary
+
             if self.n_neurons is not None:
-                session_mask = self.session_mask_prev
+                if self.prev_pos_len:
+                    if "trial_positions" in kwargs:  # get trial positions and the corresponding positional encodings
+                        trial_pos = kwargs["trial_positions"].to(y.device)
+                        num_cols = (len(self.n_neurons[0]) - 1) * self.prev_pos_len
+                        trial_pos_enc = np.zeros((trial_pos.shape[0], num_cols))
+                        for row in np.arange(trial_pos.shape[0]):
+                            for session in np.arange(
+                                len(self.n_neurons[0]) - 1
+                            ):  # get positional encoding for each image
+                                trial_pos_enc[row][
+                                    session * self.prev_pos_len : (session + 1) * self.prev_pos_len
+                                ] = self.pos_enc[int(trial_pos[row][int(self.n_neurons[0][session])])]
+                    else:  # raise error if trial positions should be included, but are not passed to readout
+                        raise ValueError("trial_positions is not in dataloader, but is necessary for prev_pos_len != 0")
+                session_mask = self.session_mask_prev  # get session masks for zeroing out unwanted responses
                 if (
                     not self.prev_self and not self.prev_minus_self
                 ):  # if neither are True, prev_resps only needs to be repeated n_sessions number of times
@@ -1514,6 +1713,14 @@ class FullGaussian2dModulators(FullGaussian2d):
                     prev_resps = torch.repeat_interleave(prev_resps[:, :, None], repeats=n_sessions, axis=0).reshape(
                         -1, self.outdims
                     )  # repeat for number of sessions
+                    if self.prev_pos_len:  # also repeat trial positions as often as necessary
+                        trial_pos_enc = (
+                            torch.repeat_interleave(
+                                torch.from_numpy(trial_pos_enc[:, :, None]).to(torch.float), repeats=n_sessions, axis=0
+                            )
+                            .reshape(-1, num_cols)
+                            .to(y.device)
+                        )
                     prev_resps = (prev_resps.reshape(-1, n_sessions, self.outdims) * session_mask).reshape(
                         -1, self.outdims
                     )
@@ -1527,24 +1734,43 @@ class FullGaussian2dModulators(FullGaussian2d):
                     prev_resps = (prev_resps.reshape(-1, self.outdims, self.outdims) * session_mask).reshape(
                         -1, self.outdims
                     )  # apply session mask to targets
-            y_prev = self.prev_modulator(prev_resps)
+                    if self.prev_pos_len:  # also repeat trial positions as often as necessary
+                        trial_pos_enc = (
+                            torch.repeat_interleave(
+                                torch.from_numpy(trial_pos_enc[:, :, None]).to(torch.float),
+                                repeats=self.outdims,
+                                axis=0,
+                            )
+                            .reshape(-1, num_cols)
+                            .to(y.device)
+                        )
+
+            if self.prev_pos_len:  # get predicted modulations
+                trial_pos_enc = (trial_pos_enc.reshape(-1, n_sessions, num_cols) * self.pos_mask_prev).reshape(
+                    -1, num_cols
+                )
+                y_prev = self.prev_modulator(torch.hstack((prev_resps, trial_pos_enc)))
+            else:
+                y_prev = self.prev_modulator(prev_resps)
+
             if self.n_neurons is not None:
-                if not self.prev_self and not self.prev_minus_self:
-                    # get predicted responses from each session
+                if not self.prev_self and not self.prev_minus_self:  # get predicted responses from each session
                     y_prev = y_prev.reshape(-1, n_sessions, self.outdims)[
                         :, self.session_mask_idx[:, 0], self.session_mask_idx[:, 1]
                     ].reshape(-1, self.outdims)
-                else:
-                    # get the predictions from the respective neurons on the diagonal
+                else:  # get the predictions from the respective neurons on the diagonal
                     y_prev = y_prev.reshape(-1, self.outdims, self.outdims)[
                         :, self.diag_idx[:, 0], self.diag_idx[:, 1]
                     ].reshape(-1, self.outdims)
-            if self.prev_combine_addition:
+
+            if (
+                self.prev_combine_addition
+            ):  # combine modulation and prior prediction either by addition or multiplication
                 y += y_prev
             else:
                 y *= y_prev
 
-        if self.bias is not None:
+        if self.bias is not None:  # add bias
             y = y + bias
 
         return y
